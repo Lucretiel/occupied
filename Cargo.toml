@@ -3,4 +3,9 @@ name = "occupied"
 version = "1.0.0"
 edition = "2024"
 
-[dependencies]
+readme = "./README.md"
+license = "MPL-2.0"
+description = "A type-safe way to interact with removing from and inserting into options."
+repository = "https://github.com/Lucretiel/occupied"
+
+categories = ["no-std::no-alloc", "rust-patterns"]
