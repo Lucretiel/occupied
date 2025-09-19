@@ -9,9 +9,9 @@ somehow.
 
 # Example
 
-Suppose you had a tuple of options, and wanted to unwrap them all, but only
+Suppose you had an array of options, and wanted to unwrap them all, but only
 if they're all `Some`, and leave them all untouched otherwise. If you own the
-tuple, this is easy to do with a `match`, but if not, you have to either:
+array, this is easy to do with a `match`, but if not, you have to either:
 
 1. Manually check `.is_some()` on all of them, and then `.unwrap()` them only
    after they've all been checked, or
@@ -24,267 +24,202 @@ system, making it checked at compile-time, without actually mutating the option.
 ```
 use occupied::OptionExt as _;
 
-fn try_unwrap_all<A, B, C, D>(
-    options: &mut (Option<A>, Option<B>, Option<C>, Option<D>)
-) -> Option<(A, B, C, D)> {
-    // Create a tuple of `Occupied` instances, guaranteeing that the underlying
+fn try_unwrap_all<T>(options: &mut [Option<T>; 4]) -> Option<[T; 4]> {
+    // (this code will be simpler when `array::try_map` is available)
+    let [opt1, opt2, opt3, opt4] = options;
+
+    // Create an of `Occupied` instances, guaranteeing that the underlying
     // options are `Some`
-    let confirmed = (
-        options.0.peek_some()?,
-        options.1.peek_some()?,
-        options.2.peek_some()?,
-        options.3.peek_some()?,
-    );
+    let confirmed = [
+        opt1.peek_some()?,
+        opt2.peek_some()?,
+        opt3.peek_some()?,
+        opt4.peek_some()?,
+    ];
 
     // `.take()` all of the values
-    Some((
-        confirmed.0.take(),
-        confirmed.1.take(),
-        confirmed.2.take(),
-        confirmed.3.take(),
-    ))
+    Some(confirmed.map(|item| item.take()))
 }
 
-let mut opts = (Some(1), Some(2), Some(3), None);
+let mut opts = [Some(1), Some(2), Some(3), None];
 
 assert_eq!(try_unwrap_all(&mut opts), None);
-assert_eq!(opts, (Some(1), Some(2), Some(3), None));
+assert_eq!(opts, [Some(1), Some(2), Some(3), None]);
 
-opts.3 = Some(4);
+opts[3] = Some(4);
 
 
-assert_eq!(try_unwrap_all(&mut opts), Some((1, 2, 3, 4)));
-assert_eq!(opts, (None, None, None, None));
+assert_eq!(try_unwrap_all(&mut opts), Some([1, 2, 3, 4]));
+assert_eq!(opts, [None, None, None, None]);
 ```
 */
 
+use core::hint::unreachable_unchecked;
+
 /// Hide implementation details in a submodule, to contain the sites where
-/// `Occupied.option` can be accessed directly (because that can be done
-/// without `unsafe`). We'd rather force the use of `unsafe{}` to call the
-/// relevant methods.
-mod occupied_impl {
-    use core::hint::unreachable_unchecked;
-
-    use super::Vacant;
-
-    /**
-    A reference to an [`Option`] that is statically guaranteed to be occupied,
-    meaning we can [`.take()`][Occupied::take] the object out unconditionally,
-    and infallibly, leaving a [`None`] in its place.
-     */
-    #[derive(Debug)]
-    pub struct Occupied<'a, T> {
-        option: &'a mut Option<T>,
-    }
-
-    impl<'a, T> Occupied<'a, T> {
+/// `Occupied.option` and `Vacant.option` can be accessed directly (because
+/// that can be done without `unsafe`). We'd rather force the use of `unsafe{}`
+/// to call the relevant methods.
+mod internals {
+    mod occupied {
         /**
-        Create a new [`Occupied`], referencing an [`Option`] that is definitely
-        [`Some`].
-
-        # Safety
-
-        The `option` parameter MUST be [`Some`].
-         */
-        #[inline(always)]
-        #[must_use]
-        pub unsafe fn new_unchecked(option: &'a mut Option<T>) -> Self {
-            debug_assert!(option.is_some());
-            Self { option }
-        }
-
-        /**
-        Get an immutable reference to the data in the referenced option.
-
-        # Example
-
-        ```
-        use occupied::OptionExt as _;
-
-        let mut opt = Some("hello");
-        let occupied = opt.peek_some().unwrap();
-
-        assert_eq!(*occupied.get(), "hello");
-        ```
+        A reference to an [`Option`] that is statically guaranteed to be occupied,
+        meaning we can [`.take()`][Occupied::take] the object out unconditionally,
+        and infallibly, leaving a [`None`] in its place.
         */
-        #[inline(always)]
-        #[must_use]
-        pub fn get(&self) -> &T {
-            debug_assert!(self.option.is_some());
-            unsafe { self.option.as_ref().unwrap_unchecked() }
+        #[derive(Debug)]
+        pub struct Occupied<'a, T> {
+            option: &'a mut Option<T>,
         }
 
-        /**
-        Get an mutable reference to the data in the referenced option.
+        impl<'a, T> Occupied<'a, T> {
+            /**
+            Create a new [`Occupied`], referencing an [`Option`] that is definitely
+            [`Some`].
 
-        # Example
+            # Safety
 
-        ```
-        use occupied::OptionExt as _;
+            The `option` parameter MUST be [`Some`].
+            */
+            #[inline(always)]
+            #[must_use]
+            pub const unsafe fn new_unchecked(option: &'a mut Option<T>) -> Self {
+                debug_assert!(option.is_some());
+                Self { option }
+            }
 
-        let mut opt = Some("hello");
-        let mut occupied = opt.peek_some().unwrap();
+            /**
+            Get an immutable reference to the data in the referenced option.
 
-        *occupied.get_mut() = "goodbye";
+            # Example
 
-        assert_eq!(opt, Some("goodbye"));
-        ```
-        */
-        #[inline(always)]
-        #[must_use]
-        pub fn get_mut(&mut self) -> &mut T {
-            debug_assert!(self.option.is_some());
-            unsafe { self.option.as_mut().unwrap_unchecked() }
-        }
+            ```
+            use occupied::OptionExt as _;
 
-        /**
-        Get a mutable reference to the underlying value with the original
-        lifetime.
-         */
-        #[inline(always)]
-        #[must_use]
-        pub fn into_mut(self) -> &'a mut T {
-            debug_assert!(self.option.is_some());
-            unsafe { self.option.as_mut().unwrap_unchecked() }
-        }
+            let mut opt = Some("hello");
+            let occupied = opt.peek_some().unwrap();
 
-        /**
-        Get a mutable reference to the underlying [`Option`]. This destroys
-        `self`, because we lose the guarantee that the option is occupied.
+            assert_eq!(*occupied.get(), "hello");
+            ```
+            */
+            #[inline(always)]
+            #[must_use]
+            pub const fn get(&self) -> &T {
+                debug_assert!(self.option.is_some());
+                unsafe { self.option.as_ref().unwrap_unchecked() }
+            }
 
-        # Example
+            /**
+            Get an mutable reference to the data in the referenced option.
 
-        ```
-        use occupied::OptionExt as _;
+            # Example
 
-        let mut opt = Some("hello");
-        let mut occupied = opt.peek_some().unwrap();
+            ```
+            use occupied::OptionExt as _;
 
-        let reference = occupied.into_inner();
-        *reference = None;
+            let mut opt = Some("hello");
+            let mut occupied = opt.peek_some().unwrap();
 
-        assert_eq!(opt, None)
-        ```
-         */
-        #[inline(always)]
-        #[must_use]
-        pub fn into_inner(self) -> &'a mut Option<T> {
-            self.option
-        }
+            *occupied.get_mut() = "goodbye";
 
-        /**
-        Identical to [`.take()`][Self::take], except that it also returns a
-        [`Vacant`] instance, allowing something to later be inserted into the
-        guaranteed-to-be-`None` option. Usually you can just use
-        [`.take()`][Self::take].
-        */
-        #[inline(always)]
-        pub fn extract(self) -> (Vacant<'a, T>, T) {
-            // Destructure to preserve the invariant that an `Occupied` ALWAYS
-            // contains a `Some`, since that won't be true after we (`.take()`)
-            let Occupied { option } = self;
+            assert_eq!(opt, Some("goodbye"));
+            ```
+            */
+            #[inline(always)]
+            #[must_use]
+            pub const fn get_mut(&mut self) -> &mut T {
+                debug_assert!(self.option.is_some());
+                unsafe { self.option.as_mut().unwrap_unchecked() }
+            }
 
-            debug_assert!(option.is_some());
+            /**
+            Get a mutable reference to the underlying [`Option`]. This destroys
+            `self`, because we lose the guarantee that the option is occupied.
 
-            match option.take() {
-                // Safety: an option from an `Occupied` is always `Some`
-                None => unsafe { unreachable_unchecked() },
+            # Example
 
-                // Safety: after `.take()`, the Option is definitely `None`
-                Some(item) => (unsafe { Vacant::new_unchecked(option) }, item),
+            ```
+            use occupied::OptionExt as _;
+
+            let mut opt = Some("hello");
+            let mut occupied = opt.peek_some().unwrap();
+
+            let reference = occupied.into_inner();
+            *reference = None;
+
+            assert_eq!(opt, None)
+            ```
+            */
+            #[inline(always)]
+            #[must_use]
+            pub const fn into_inner(self) -> &'a mut Option<T> {
+                self.option
             }
         }
     }
-}
 
-pub use occupied_impl::Occupied;
-
-mod vacant_impl {
-    use super::Occupied;
-    use core::hint::unreachable_unchecked;
-
-    /**
-    A reference to an [`Option`] that is statically guaranteed to be vacant.
-    This type is fairly niche, but it allows *slightly* more efficient inserts
-    into the referenced option.
-    */
-    #[derive(Debug)]
-    pub struct Vacant<'a, T> {
-        option: &'a mut Option<T>,
-    }
-
-    impl<'a, T> Vacant<'a, T> {
+    mod vacant {
         /**
-        Create a new [`Vacant`], referencing an [`Option`] which is guaranteed
-        to be [`None`].
-
-        # Safety
-
-        The referenced option *must* be [`None`].
-         */
-        #[inline(always)]
-        #[must_use]
-        pub unsafe fn new_unchecked(option: &'a mut Option<T>) -> Self {
-            debug_assert!(option.is_none());
-            Self { option }
-        }
-
-        /**
-        Get a mutable reference to the underlying [`Option`]. This destroys
-        `self`, because we lose the guarantee that the option is vacant.
-
-        # Example
-
-        ```
-        use occupied::OptionExt as _;
-
-        let mut opt = Some("hello");
-        let mut occupied = opt.peek_some().unwrap();
-
-        let (vacant, item) = occupied.extract();
-        assert_eq!(item, "hello");
-
-        let reference = vacant.into_inner();
-        assert!(reference.is_none());
-        *reference = Some("goodbye");
-
-        assert_eq!(opt, Some("goodbye"));
-        ```
-         */
-        #[inline(always)]
-        #[must_use]
-        pub fn into_inner(self) -> &'a mut Option<T> {
-            self.option
-        }
-
-        /**
-        Insert an item into the [`Vacant`] option, and return an [`Occupied`]
-        reference to the inserted item. This will be *slightly* more efficient
-        than [`Option::insert`], since [`Option::insert`] must check whether
-        the option is currently [`Some`] and destruct if so.
+        A reference to an [`Option`] that is statically guaranteed to be vacant.
+        This type is fairly niche, but it allows *slightly* more efficient inserts
+        into the referenced option.
         */
-        #[inline(always)]
-        pub fn insert(self, item: T) -> Occupied<'a, T> {
-            // Destructure to preserve the invariant that an `Vacant` ALWAYS
-            // contains a `None`, since that won't be true after we insert
-            let Vacant { option } = self;
+        #[derive(Debug)]
+        pub struct Vacant<'a, T> {
+            option: &'a mut Option<T>,
+        }
 
-            debug_assert!(option.is_none());
+        impl<'a, T> Vacant<'a, T> {
+            /**
+            Create a new [`Vacant`], referencing an [`Option`] which is guaranteed
+            to be [`None`].
 
-            // Use an unreachable branch to avoid the conditional, since we
-            // know the option is `None`
-            match *option {
-                Some(_) => unsafe { unreachable_unchecked() },
-                None => {
-                    *option = Some(item);
-                    unsafe { Occupied::new_unchecked(option) }
-                }
+            # Safety
+
+            The referenced option *must* be [`None`].
+             */
+            #[inline(always)]
+            #[must_use]
+            pub const unsafe fn new_unchecked(option: &'a mut Option<T>) -> Self {
+                debug_assert!(option.is_none());
+                Self { option }
+            }
+
+            /**
+            Get a mutable reference to the underlying [`Option`]. This destroys
+            `self`, because we lose the guarantee that the option is vacant.
+
+            # Example
+
+            ```
+            use occupied::OptionExt as _;
+
+            let mut opt = Some("hello");
+            let mut occupied = opt.peek_some().unwrap();
+
+            let (vacant, item) = occupied.extract();
+            assert_eq!(item, "hello");
+
+            let reference = vacant.into_inner();
+            assert!(reference.is_none());
+            *reference = Some("goodbye");
+
+            assert_eq!(opt, Some("goodbye"));
+            ```
+             */
+            #[inline(always)]
+            #[must_use]
+            pub const fn into_inner(self) -> &'a mut Option<T> {
+                self.option
             }
         }
     }
+
+    pub use occupied::Occupied;
+    pub use vacant::Vacant;
 }
 
-pub use vacant_impl::Vacant;
+pub use internals::{Occupied, Vacant};
 
 impl<'a, T> Occupied<'a, T> {
     /**
@@ -293,13 +228,27 @@ impl<'a, T> Occupied<'a, T> {
      */
     #[inline(always)]
     #[must_use]
-    pub fn new(option: &'a mut Option<T>) -> Option<Self> {
+    pub const fn new(option: &'a mut Option<T>) -> Option<Self> {
         // Use `examine` to reduce the amount of unsafe and trust that inlining
         // will produce efficient code.
         match examine(option) {
             Entry::Occupied(occupied) => Some(occupied),
             Entry::Vacant(_) => None,
         }
+    }
+
+    /**
+    Get a mutable reference to the underlying value with the original
+    lifetime.
+    */
+    #[inline(always)]
+    #[must_use]
+    pub const fn into_mut(self) -> &'a mut T {
+        let option = self.into_inner();
+        debug_assert!(option.is_some());
+
+        // Safety: the option in `Occupied` is guaranteed to be `Some`
+        unsafe { option.as_mut().unwrap_unchecked() }
     }
 
     /**
@@ -318,8 +267,34 @@ impl<'a, T> Occupied<'a, T> {
     ```
      */
     #[inline(always)]
-    pub fn take(self) -> T {
-        self.extract().1
+    pub const fn take(self) -> T {
+        // TODO: currently, const limitations mean that we can't define this
+        // in terms of extract; the compiler insists that it be possible to
+        // call the destructor of the (Vacant, T) tuple even if it's
+        // destructured.
+        let option = self.into_inner();
+        debug_assert!(option.is_some());
+
+        // Safety: option from `Occupied` is guaranteed to be `Some`.
+        unsafe { option.take().unwrap_unchecked() }
+    }
+
+    /**
+    Identical to [`.take()`][Self::take], except that it also returns a
+    [`Vacant`] instance, allowing something to later be inserted into the
+    guaranteed-to-be-`None` option. Usually you can just use
+    [`.take()`][Self::take].
+    */
+    #[inline(always)]
+    pub const fn extract(self) -> (Vacant<'a, T>, T) {
+        let option = self.into_inner();
+        debug_assert!(option.is_some());
+
+        // Safety: option from an `Occupied` is guaranteed to be `Some`
+        let item = unsafe { option.take().unwrap_unchecked() };
+
+        // Safety: option is guaranteed to be `None` after `take`
+        (unsafe { Vacant::new_unchecked(option) }, item)
     }
 }
 
@@ -342,10 +317,42 @@ impl<'a, T> Vacant<'a, T> {
      */
     #[inline(always)]
     #[must_use]
-    pub fn new(option: &'a mut Option<T>) -> Option<Self> {
+    pub const fn new(option: &'a mut Option<T>) -> Option<Self> {
         match examine(option) {
             Entry::Vacant(vacant) => Some(vacant),
             Entry::Occupied(_) => None,
+        }
+    }
+
+    /**
+    Insert an item into the [`Vacant`] option, and return an [`Occupied`]
+    reference to the inserted item. This will be *slightly* more efficient
+    than [`Option::insert`], since [`Option::insert`] must check whether
+    the option is currently [`Some`] and destruct if so.
+    */
+    #[inline(always)]
+    pub const fn insert(self, item: T) -> Occupied<'a, T> {
+        let option = self.into_inner();
+        debug_assert!(option.is_none());
+
+        // Use an unreachable branch to avoid the conditional, since we
+        // know the option is `None`
+        match *option {
+            // Safety: an option from a `Vacant` is always `None`
+            Some(_) => unsafe { unreachable_unchecked() },
+
+            None => {
+                // Safety: `option` is, of course, safe to write to, it's
+                // a regular mutable reference. This will leak the contents
+                // of `option`, but we know that's just a `None`, so there's
+                // no problem there. We can't use a regular assignment here
+                // because of `const` limitations.
+                unsafe { core::ptr::write(option, Some(item)) };
+
+                // Safety: `option` is now guaranteed to be `Some`, since
+                // we just wrote to it.
+                unsafe { Occupied::new_unchecked(option) }
+            }
         }
     }
 }
@@ -404,14 +411,19 @@ impl<'a, T> Entry<'a, T> {
     on the original [`Option`].
      */
     #[inline]
-    pub fn remove(self) -> (Option<T>, Vacant<'a, T>) {
-        match self {
-            Entry::Occupied(occupied) => {
-                let (vacant, item) = occupied.extract();
-                (Some(item), vacant)
-            }
-            Entry::Vacant(vacant) => (None, vacant),
-        }
+    pub const fn remove(self) -> (Option<T>, Vacant<'a, T>) {
+        // In the future we'd rather just call `occupied.extract()`, but
+        // limitations in the compiler's ability to reason about tuple
+        // destructors in a const context prevent this for now.
+        let opt = match self {
+            Self::Occupied(occupied) => occupied.into_inner(),
+            Self::Vacant(vacant) => vacant.into_inner(),
+        };
+
+        let item = opt.take();
+
+        // Safety: after `take`, the `option` is guaranteed to be `None`
+        (item, unsafe { Vacant::new_unchecked(opt) })
     }
 
     /**
@@ -419,7 +431,7 @@ impl<'a, T> Entry<'a, T> {
     option.
      */
     #[inline]
-    pub fn into_inner(self) -> &'a mut Option<T> {
+    pub const fn into_inner(self) -> &'a mut Option<T> {
         match self {
             Entry::Occupied(occupied) => occupied.into_inner(),
             Entry::Vacant(vacant) => vacant.into_inner(),
@@ -434,7 +446,7 @@ you'll call [`.entry()`][OptionExt::entry] or [`.peek_some`][OptionExt::peek_som
 instead of this.
  */
 #[inline]
-pub fn examine<T>(option: &mut Option<T>) -> Entry<'_, T> {
+pub const fn examine<T>(option: &mut Option<T>) -> Entry<'_, T> {
     match option {
         opt @ &mut Some(_) => Entry::Occupied(unsafe { Occupied::new_unchecked(opt) }),
         opt @ &mut None => Entry::Vacant(unsafe { Vacant::new_unchecked(opt) }),
